@@ -98,6 +98,108 @@ test('静默前缀 + 可观察承接的典型等价：tau 前缀进程与直接�
   assert.equal(r.equivalent, true);
 });
 
+test('环内单点可观察动作：初态与两个中继形成单向 tau 环，应等价且两个初始对均存活', () => {
+  const r = audit(samples.ring.procA, samples.ring.procB);
+  assert.equal(r.ok, true);
+  assert.equal(r.equivalent, true, JSON.stringify(r.eliminatedPairs));
+  assert.deepEqual(r.initialPairs, [['s0', 't0'], ['t0', 's0']]);
+  assert.deepEqual(r.initialAlive, [true, true]);
+  assert.ok(r.finalRelation.some((p) => p[0] === 's0' && p[1] === 't0'));
+  assert.ok(r.finalRelation.some((p) => p[0] === 't0' && p[1] === 's0'));
+  // 两个方向的初始状态对均未被淘汰（无初始对淘汰）
+  assert.ok(!r.eliminatedPairs.some((p) => p.pair[0] === 's0' && p.pair[1] === 't0'));
+  assert.ok(!r.eliminatedPairs.some((p) => p.pair[0] === 't0' && p.pair[1] === 's0'));
+});
+
+test('环内每个状态沿内部环继续跳转后都能承接 x（静默环可达完整且确定）', () => {
+  const proc = normalize(samples.ring.procA);
+  for (const s of ['s0', 's1', 's2']) {
+    assert.deepEqual([...weakTargets(proc, s, 'x')], ['s3'], `状态 ${s} 应经静默环到达 s1 后承接 x`);
+  }
+  // 终态无后续迁移
+  assert.deepEqual([...weakTargets(proc, 's3', 'x')], []);
+  assert.deepEqual([...weakTargets(proc, 's3', TAU)], ['s3']);
+});
+
+test('环场景输入重排：调换状态或迁移录入顺序不改变裁决、首个淘汰对与候选响应', () => {
+  const { procA, procB } = samples.ring;
+  const reorder = (spec, revStates, revTrans) => ({
+    ...spec,
+    states: revStates ? [...spec.states].reverse() : spec.states,
+    transitions: revTrans ? [...spec.transitions].reverse() : spec.transitions,
+  });
+  const signature = (r) => JSON.stringify({
+    equivalent: r.equivalent,
+    initialAlive: r.initialAlive,
+    rounds: r.rounds.map((rd) => rd.eliminated.map((e) => [e.pair, e.action, e.challenger])),
+    firstEliminated: r.firstEliminated && [
+      r.firstEliminated.pair,
+      r.firstEliminated.action,
+      r.firstEliminated.challenger,
+      r.firstEliminated.transitions.map((t) => [
+        t.source,
+        t.reason,
+        (t.responses || []).map((w) => [w.target, w.pair, w.eliminatedRound]),
+      ]),
+    ],
+  });
+  const results = [];
+  for (const revStates of [false, true]) {
+    for (const revTrans of [false, true]) {
+      const r = audit(reorder(procA, revStates, revTrans), reorder(procB, revStates, revTrans));
+      assert.equal(r.equivalent, true);
+      results.push(signature(r));
+    }
+  }
+  assert.equal(new Set(results).size, 1, '四种录入排列的裁决与淘汰/候选响应细节应完全一致');
+});
+
+test('任意长度静默环、环内汇合与分叉、环内不同位置发动作：可达完整且与直接动作进程等价', () => {
+  // r0→r1→r2→r4→r3→r5→r0（6 状态环），且 r1→r3 为环内分叉后汇合；
+  // x/y/z 分别从 r5/r2/r4 发出到终态。
+  const ring = {
+    states: ['r0', 'r1', 'r2', 'r3', 'r4', 'r5', 'd0', 'd1', 'd2'].map((name) => ({ name })),
+    initial: 'r0',
+    transitions: [
+      { id: 'c1', from: 'r0', action: 'tau', to: 'r1' },
+      { id: 'c2', from: 'r1', action: 'tau', to: 'r2' },
+      { id: 'c3', from: 'r1', action: 'tau', to: 'r3' },
+      { id: 'c4', from: 'r2', action: 'tau', to: 'r4' },
+      { id: 'c5', from: 'r4', action: 'tau', to: 'r3' },
+      { id: 'c6', from: 'r3', action: 'tau', to: 'r5' },
+      { id: 'c7', from: 'r5', action: 'tau', to: 'r0' },
+      { id: 'cx', from: 'r5', action: 'x', to: 'd0' },
+      { id: 'cy', from: 'r2', action: 'y', to: 'd1' },
+      { id: 'cz', from: 'r4', action: 'z', to: 'd2' },
+    ],
+  };
+  const proc = normalize(ring);
+  for (const s of ['r0', 'r1', 'r2', 'r3', 'r4', 'r5']) {
+    assert.equal(proc.tauClosures.get(s).size, 6, `${s} 的静默闭包应覆盖环上全部 6 个状态`);
+    assert.deepEqual([...weakTargets(proc, s, 'x')].sort(), ['d0']);
+    assert.deepEqual([...weakTargets(proc, s, 'y')].sort(), ['d1']);
+    assert.deepEqual([...weakTargets(proc, s, 'z')].sort(), ['d2']);
+  }
+  const direct = {
+    states: [{ name: 'q' }, { name: 'e0' }, { name: 'e1' }, { name: 'e2' }],
+    initial: 'q',
+    transitions: [
+      { id: 'dx', from: 'q', action: 'x', to: 'e0' },
+      { id: 'dy', from: 'q', action: 'y', to: 'e1' },
+      { id: 'dz', from: 'q', action: 'z', to: 'e2' },
+    ],
+  };
+  assert.equal(audit(ring, direct).equivalent, true);
+  // 反向录入（状态与迁移均倒序）裁决一致
+  assert.equal(
+    audit(
+      { ...ring, states: [...ring.states].reverse(), transitions: [...ring.transitions].reverse() },
+      { ...direct, states: [...direct.states].reverse(), transitions: [...direct.transitions].reverse() },
+    ).equivalent,
+    true,
+  );
+});
+
 test('输入无效：一次显示所有问题并清除旧结论', () => {
   const bad = {
     states: [{ name: 'x' }, { name: 'x' }, {}, { name: 'bad name' }],

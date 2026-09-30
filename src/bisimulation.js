@@ -104,26 +104,28 @@ function normalize(spec) {
 // ---------- 弱转移 ----------
 
 function buildTauClosures(names, out) {
+  // 以迭代式可达集计算每个状态经任意条（含 0 条）tau 可到达的全部状态。
+  // 任意长度的静默环（含自环）、环内汇合与分叉都能完整收敛；
+  // 结果只取决于图结构本身：邻接按状态名排序遍历，
+  // 与状态、迁移的录入顺序无关。
   const cached = new Map();
-
-  function collect(state, visiting) {
-    if (cached.has(state)) return new Set(cached.get(state));
-    if (visiting.has(state)) return new Set([state]);
-
-    const closure = new Set([state]);
-    const nextVisiting = new Set(visiting);
-    nextVisiting.add(state);
-    const tauTargets = out.get(state) && out.get(state).get(TAU);
-    if (tauTargets) {
-      for (const target of [...tauTargets].sort()) {
-        for (const reached of collect(target, nextVisiting)) closure.add(reached);
+  for (const state of names) {
+    const seen = new Set([state]);
+    const stack = [state];
+    while (stack.length) {
+      const u = stack.pop();
+      const tauTargets = out.get(u) && out.get(u).get(TAU);
+      if (tauTargets) {
+        for (const v of [...tauTargets].sort()) {
+          if (!seen.has(v)) {
+            seen.add(v);
+            stack.push(v);
+          }
+        }
       }
     }
-    cached.set(state, closure);
-    return new Set(closure);
+    cached.set(state, seen);
   }
-
-  for (const state of names) collect(state, new Set());
   return cached;
 }
 

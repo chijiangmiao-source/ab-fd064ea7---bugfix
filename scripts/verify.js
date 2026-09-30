@@ -6,6 +6,7 @@
 //   2) 代码测试：node --test
 //   3) 接口 / HTTP 冒烟：健康路径、页面、审计接口
 //      - 静默环等价规程：审计必须判定等价，关系含两个初始状态对
+//      - 环内单点可观察动作规程：沿静默环继续跳转后承接 x，必须判等价且无初始对淘汰
 //      - 缺失匹配动作规程：审计必须判定不等价，且失败依据只引用更早轮次
 //      - 无效输入：一次返回全部问题并清除旧结论
 // 完成后退出：全部通过 0，任一失败 1。
@@ -110,11 +111,11 @@ async function postAudit(body) {
     assert.ok(html.includes('弱互模拟审计'));
   });
 
-  await astep('示例接口 GET /api/samples 包含等价与缺失规程', async () => {
+  await astep('示例接口 GET /api/samples 包含等价、环内动作与缺失规程', async () => {
     const res = await fetch(`${BASE}/api/samples`);
     assert.equal(res.status, 200);
     const j = await res.json();
-    assert.ok(j.equivalent && j.missing);
+    assert.ok(j.equivalent && j.ring && j.missing);
   });
 
   await astep('静默环等价规程：判定等价且关系含两个初始状态对', async () => {
@@ -124,6 +125,40 @@ async function postAudit(body) {
     assert.equal(j.initialPairs.length, 2);
     assert.deepEqual(j.initialPairs, [['S0', 'P0'], ['P0', 'S0']]);
     assert.ok(j.initialAlive.every(Boolean));
+  });
+
+  await astep('环内单点可观察动作规程：沿静默环承接 x，判等价、两个初始对均存活且无初始对淘汰', async () => {
+    const j = await postAudit(samples.ring);
+    assert.equal(j.ok, true);
+    assert.equal(j.equivalent, true, JSON.stringify(j.eliminatedPairs));
+    assert.equal(j.initialPairs.length, 2);
+    assert.deepEqual(j.initialPairs, [['s0', 't0'], ['t0', 's0']]);
+    assert.deepEqual(j.initialAlive, [true, true]);
+    assert.ok(j.finalRelation.some((p) => p[0] === 's0' && p[1] === 't0'));
+    assert.ok(j.finalRelation.some((p) => p[0] === 't0' && p[1] === 's0'));
+    assert.ok(!j.eliminatedPairs.some((p) => (p.pair[0] === 's0' && p.pair[1] === 't0')
+      || (p.pair[0] === 't0' && p.pair[1] === 's0')));
+  });
+
+  await astep('环场景输入重排：调换状态/迁移录入顺序不改变 HTTP 裁决', async () => {
+    const reorder = (spec, revStates, revTrans) => ({
+      ...spec,
+      states: revStates ? [...spec.states].reverse() : spec.states,
+      transitions: revTrans ? [...spec.transitions].reverse() : spec.transitions,
+    });
+    const verdicts = [];
+    for (const revStates of [false, true]) {
+      for (const revTrans of [false, true]) {
+        const j = await postAudit({
+          procA: reorder(samples.ring.procA, revStates, revTrans),
+          procB: reorder(samples.ring.procB, revStates, revTrans),
+        });
+        assert.equal(j.equivalent, true, JSON.stringify(j.eliminatedPairs));
+        assert.deepEqual(j.initialAlive, [true, true]);
+        verdicts.push([j.equivalent, j.rounds.length, j.eliminatedPairs.length]);
+      }
+    }
+    assert.equal(new Set(verdicts.map(JSON.stringify)).size, 1);
   });
 
   await astep('缺失匹配动作规程：判定不等价，首个失败动作为 x', async () => {
